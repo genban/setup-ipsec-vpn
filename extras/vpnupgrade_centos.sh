@@ -2,7 +2,7 @@
 #
 # Script to upgrade Libreswan on CentOS and RHEL
 #
-# Copyright (C) 2016-2019 Lin Song <linsongui@gmail.com>
+# Copyright (C) 2016-2020 Lin Song <linsongui@gmail.com>
 #
 # This work is licensed under the Creative Commons Attribution-ShareAlike 3.0
 # Unported License: http://creativecommons.org/licenses/by-sa/3.0/
@@ -11,7 +11,7 @@
 # know how you have improved it!
 
 # Specify which Libreswan version to install. See: https://libreswan.org
-SWAN_VER=3.27
+SWAN_VER=3.29
 
 ### DO NOT edit below this line ###
 
@@ -22,8 +22,10 @@ exiterr2() { exiterr "'yum install' failed."; }
 
 vpnupgrade() {
 
-if ! grep -qs -e "release 6" -e "release 7" /etc/redhat-release; then
-  exiterr "This script only supports CentOS/RHEL 6 and 7."
+if ! grep -qs -e "release 6" -e "release 7" -e "release 8" /etc/redhat-release; then
+  echo "Error: This script only supports CentOS/RHEL 6, 7 and 8." >&2
+  echo "For Ubuntu/Debian, use https://git.io/vpnupgrade" >&2
+  exit 1
 fi
 
 if [ -f /proc/user_beancounters ]; then
@@ -35,14 +37,14 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 case "$SWAN_VER" in
-  3.19|3.2[0123567])
+  3.19|3.2[01235679])
     /bin/true
     ;;
   *)
 cat 1>&2 <<EOF
 Error: Libreswan version '$SWAN_VER' is not supported.
   This script can install one of the following versions:
-  3.19-3.23, 3.25-3.26 and 3.27
+  3.19-3.23, 3.25-3.27 and 3.29
 EOF
     exit 1
     ;;
@@ -50,7 +52,7 @@ esac
 
 dns_state=0
 case "$SWAN_VER" in
-  3.2[3567])
+  3.2[35679])
     DNS_SRV1=$(grep "modecfgdns1=" /etc/ipsec.conf | head -n 1 | cut -d '=' -f 2)
     DNS_SRV2=$(grep "modecfgdns2=" /etc/ipsec.conf | head -n 1 | cut -d '=' -f 2)
     [ -n "$DNS_SRV1" ] && dns_state=2
@@ -105,11 +107,22 @@ Version to install: Libreswan $SWAN_VER
 EOF
 
 case "$SWAN_VER" in
+  3.19|3.2[0123567])
+cat <<'EOF'
+WARNING: Older versions of Libreswan may contain security vulnerabilities.
+    See: https://libreswan.org/security/
+    Are you sure you want to install an older version?
+
+EOF
+    ;;
+esac
+
+case "$SWAN_VER" in
   3.2[35])
 cat <<'EOF'
 WARNING: Libreswan 3.23 and 3.25 have an issue with connecting multiple
     IPsec/XAuth VPN clients from behind the same NAT (e.g. home router).
-    DO NOT upgrade to 3.23/3.25 if your use cases include the above.
+    DO NOT install 3.23/3.25 if your use cases include the above.
 
 EOF
     ;;
@@ -119,20 +132,26 @@ cat <<'EOF'
 NOTE: Libreswan versions 3.19 and newer require some configuration changes.
     This script will make the following updates to your /etc/ipsec.conf:
 
-    1. Replace "auth=esp" with "phase2=esp"
-    2. Replace "forceencaps=yes" with "encapsulation=yes"
-    3. Optimize VPN ciphers for "ike=" and "phase2alg="
+    - Replace "auth=esp" with "phase2=esp"
+    - Replace "forceencaps=yes" with "encapsulation=yes"
+    - Optimize VPN ciphers for "ike=" and "phase2alg="
 EOF
 
 if [ "$dns_state" = "1" ] || [ "$dns_state" = "2" ]; then
 cat <<'EOF'
-    4. Replace "modecfgdns1" and "modecfgdns2" with "modecfgdns"
+    - Replace "modecfgdns1" and "modecfgdns2" with "modecfgdns"
 EOF
 fi
 
 if [ "$dns_state" = "3" ] || [ "$dns_state" = "4" ]; then
 cat <<'EOF'
-    4. Replace "modecfgdns" with "modecfgdns1" and "modecfgdns2"
+    - Replace "modecfgdns" with "modecfgdns1" and "modecfgdns2"
+EOF
+fi
+
+if [ "$SWAN_VER" = "3.29" ]; then
+cat <<'EOF'
+    - Move "ikev2=never" to section "conn shared"
 EOF
 fi
 
@@ -166,17 +185,26 @@ yum -y install epel-release || yum -y install "$epel_url" || exiterr2
 
 # Install necessary packages
 yum -y install nss-devel nspr-devel pkgconfig pam-devel \
-  libcap-ng-devel libselinux-devel curl-devel \
-  flex bison gcc make wget sed || exiterr2
+  libcap-ng-devel libselinux-devel curl-devel nss-tools \
+  flex bison gcc make wget sed tar || exiterr2
 
 REPO1='--enablerepo=*server-optional*'
 REPO2='--enablerepo=*releases-optional*'
+REPO3='--enablerepo=PowerTools'
+
 if grep -qs "release 6" /etc/redhat-release; then
   yum -y remove libevent-devel
   yum "$REPO1" "$REPO2" -y install libevent2-devel fipscheck-devel || exiterr2
-else
+elif grep -qs "release 7" /etc/redhat-release; then
   yum -y install systemd-devel || exiterr2
   yum "$REPO1" "$REPO2" -y install libevent-devel fipscheck-devel || exiterr2
+else
+  if [ -f /usr/sbin/subscription-manager ]; then
+    subscription-manager repos --enable "codeready-builder-for-rhel-8-*-rpms"
+    yum -y install systemd-devel libevent-devel fipscheck-devel || exiterr2
+  else
+    yum "$REPO3" -y install systemd-devel libevent-devel fipscheck-devel || exiterr2
+  fi
 fi
 
 # Compile and install Libreswan
@@ -197,6 +225,8 @@ cat > Makefile.inc.local <<'EOF'
 WERROR_CFLAGS =
 USE_DNSSEC = false
 USE_DH31 = false
+USE_NSS_AVA_COPY = true
+USE_NSS_IPSEC_PROFILE = false
 USE_GLIBC_KERN_FLIP_HEADERS = true
 EOF
 NPROCS=$(grep -c ^processor /proc/cpuinfo)
@@ -235,6 +265,11 @@ elif [ "$dns_state" = "3" ]; then
   sed -i "s/modecfgdns=.*/modecfgdns1=$DNS_SRV1/" /etc/ipsec.conf
 elif [ "$dns_state" = "4" ]; then
   sed -i "s/modecfgdns=.*/modecfgdns1=$DNS_SRV1/" /etc/ipsec.conf
+fi
+
+if [ "$SWAN_VER" = "3.29" ]; then
+  sed -i "/ikev2=never/d" /etc/ipsec.conf
+  sed -i "/dpdaction=clear/a \  ikev2=never" /etc/ipsec.conf
 fi
 
 # Restart IPsec service

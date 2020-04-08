@@ -8,7 +8,7 @@
 # The latest version of this script is available at:
 # https://github.com/hwdsl2/setup-ipsec-vpn
 #
-# Copyright (C) 2014-2019 Lin Song <linsongui@gmail.com>
+# Copyright (C) 2014-2020 Lin Song <linsongui@gmail.com>
 # Based on the work of Thomas Sarlandie (Copyright 2012)
 #
 # This work is licensed under the Creative Commons Attribution-ShareAlike 3.0
@@ -54,7 +54,9 @@ if [ -z "$os_type" ]; then
   [ -f /etc/lsb-release ] && os_type=$(. /etc/lsb-release && printf '%s' "$DISTRIB_ID")
 fi
 if ! printf '%s' "$os_type" | head -n 1 | grep -qiF -e ubuntu -e debian -e raspbian; then
-  exiterr "This script only supports Ubuntu and Debian."
+  echo "Error: This script only supports Ubuntu and Debian." >&2
+  echo "For CentOS/RHEL, use https://git.io/vpnsetup-centos" >&2
+  exit 1
 fi
 
 if [ "$(sed 's/\..*//' /etc/debian_version)" = "7" ]; then
@@ -164,31 +166,13 @@ apt-get -yq install libnss3-dev libnspr4-dev pkg-config \
   libcurl4-nss-dev flex bison gcc make libnss3-tools \
   libevent-dev ppp xl2tpd || exiterr2
 
-case "$(uname -r)" in
-  4.1[456]*)
-    if ! printf '%s' "$os_type" | head -n 1 | grep -qiF ubuntu; then
-      L2TP_VER=1.3.12
-      l2tp_dir="xl2tpd-$L2TP_VER"
-      l2tp_file="$l2tp_dir.tar.gz"
-      l2tp_url="https://github.com/xelerance/xl2tpd/archive/v$L2TP_VER.tar.gz"
-      apt-get -yq install libpcap0.8-dev || exiterr2
-      wget -t 3 -T 30 -nv -O "$l2tp_file" "$l2tp_url" || exit 1
-      /bin/rm -rf "/opt/src/$l2tp_dir"
-      tar xzf "$l2tp_file" && /bin/rm -f "$l2tp_file"
-      cd "$l2tp_dir" && make -s 2>/dev/null && PREFIX=/usr make -s install
-      cd /opt/src || exit 1
-      /bin/rm -rf "/opt/src/$l2tp_dir"
-    fi
-    ;;
-esac
-
 bigecho "Installing Fail2Ban to protect SSH..."
 
 apt-get -yq install fail2ban || exiterr2
 
 bigecho "Compiling and installing Libreswan..."
 
-SWAN_VER=3.27
+SWAN_VER=3.29
 swan_file="libreswan-$SWAN_VER.tar.gz"
 swan_url1="https://github.com/libreswan/libreswan/archive/v$SWAN_VER.tar.gz"
 swan_url2="https://download.libreswan.org/$swan_file"
@@ -202,6 +186,8 @@ cat > Makefile.inc.local <<'EOF'
 WERROR_CFLAGS =
 USE_DNSSEC = false
 USE_DH31 = false
+USE_NSS_AVA_COPY = true
+USE_NSS_IPSEC_PROFILE = false
 USE_GLIBC_KERN_FLIP_HEADERS = true
 EOF
 if [ "$(packaging/utils/lswan_detect.sh init)" = "systemd" ]; then
@@ -252,9 +238,10 @@ conn shared
   dpddelay=30
   dpdtimeout=120
   dpdaction=clear
+  ikev2=never
   ike=aes256-sha2,aes128-sha2,aes256-sha1,aes128-sha1,aes256-sha2;modp1024,aes128-sha1;modp1024
   phase2alg=aes_gcm-null,aes128-sha1,aes256-sha1,aes256-sha2_512,aes128-sha2,aes256-sha2
-  sha2-truncbug=yes
+  sha2-truncbug=no
 
 conn l2tp-psk
   auto=add
@@ -276,7 +263,6 @@ conn xauth-psk
   modecfgpull=yes
   xauthby=file
   ike-frag=yes
-  ikev2=never
   cisco-unity=yes
   also=shared
 EOF

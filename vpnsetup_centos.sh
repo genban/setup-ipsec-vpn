@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Script for automatic setup of an IPsec VPN server on CentOS/RHEL 6 and 7.
+# Script for automatic setup of an IPsec VPN server on CentOS/RHEL 6, 7 and 8.
 # Works on any dedicated server or virtual private server (VPS) except OpenVZ.
 #
 # DO NOT RUN THIS SCRIPT ON YOUR PC OR MAC!
@@ -8,7 +8,7 @@
 # The latest version of this script is available at:
 # https://github.com/hwdsl2/setup-ipsec-vpn
 #
-# Copyright (C) 2015-2019 Lin Song <linsongui@gmail.com>
+# Copyright (C) 2015-2020 Lin Song <linsongui@gmail.com>
 # Based on the work of Thomas Sarlandie (Copyright 2012)
 #
 # This work is licensed under the Creative Commons Attribution-ShareAlike 3.0
@@ -48,8 +48,10 @@ check_ip() {
 
 vpnsetup() {
 
-if ! grep -qs -e "release 6" -e "release 7" /etc/redhat-release; then
-  exiterr "This script only supports CentOS/RHEL 6 and 7."
+if ! grep -qs -e "release 6" -e "release 7" -e "release 8" /etc/redhat-release; then
+  echo "Error: This script only supports CentOS/RHEL 6, 7 and 8." >&2
+  echo "For Ubuntu/Debian, use https://git.io/vpnsetup" >&2
+  exit 1
 fi
 
 if [ -f /proc/user_beancounters ]; then
@@ -111,7 +113,7 @@ cd /opt/src || exit 1
 
 bigecho "Installing packages required for setup..."
 
-yum -y install wget bind-utils openssl \
+yum -y install wget bind-utils openssl tar \
   iptables iproute gawk grep sed net-tools || exiterr2
 
 bigecho "Trying to auto discover IP of this server..."
@@ -139,9 +141,10 @@ bigecho "Installing packages required for the VPN..."
 REPO1='--enablerepo=epel'
 REPO2='--enablerepo=*server-optional*'
 REPO3='--enablerepo=*releases-optional*'
+REPO4='--enablerepo=PowerTools'
 
 yum -y install nss-devel nspr-devel pkgconfig pam-devel \
-  libcap-ng-devel libselinux-devel curl-devel \
+  libcap-ng-devel libselinux-devel curl-devel nss-tools \
   flex bison gcc make ppp || exiterr2
 
 yum "$REPO1" -y install xl2tpd || exiterr2
@@ -149,28 +152,17 @@ yum "$REPO1" -y install xl2tpd || exiterr2
 if grep -qs "release 6" /etc/redhat-release; then
   yum -y remove libevent-devel
   yum "$REPO2" "$REPO3" -y install libevent2-devel fipscheck-devel || exiterr2
-else
+elif grep -qs "release 7" /etc/redhat-release; then
   yum -y install systemd-devel iptables-services || exiterr2
   yum "$REPO2" "$REPO3" -y install libevent-devel fipscheck-devel || exiterr2
+else
+  if [ -f /usr/sbin/subscription-manager ]; then
+    subscription-manager repos --enable "codeready-builder-for-rhel-8-*-rpms"
+    yum -y install systemd-devel iptables-services libevent-devel fipscheck-devel || exiterr2
+  else
+    yum "$REPO4" -y install systemd-devel iptables-services libevent-devel fipscheck-devel || exiterr2
+  fi
 fi
-
-case "$(uname -r)" in
-  4.1[456]*)
-    if grep -qs "release 6" /etc/redhat-release; then
-      L2TP_VER=1.3.12
-      l2tp_dir="xl2tpd-$L2TP_VER"
-      l2tp_file="$l2tp_dir.tar.gz"
-      l2tp_url="https://github.com/xelerance/xl2tpd/archive/v$L2TP_VER.tar.gz"
-      yum "$REPO2" "$REPO3" -y install libpcap-devel || exiterr2
-      wget -t 3 -T 30 -nv -O "$l2tp_file" "$l2tp_url" || exit 1
-      /bin/rm -rf "/opt/src/$l2tp_dir"
-      tar xzf "$l2tp_file" && /bin/rm -f "$l2tp_file"
-      cd "$l2tp_dir" && make -s 2>/dev/null && PREFIX=/usr make -s install
-      cd /opt/src || exit 1
-      /bin/rm -rf "/opt/src/$l2tp_dir"
-    fi
-    ;;
-esac
 
 bigecho "Installing Fail2Ban to protect SSH..."
 
@@ -178,7 +170,7 @@ yum "$REPO1" -y install fail2ban || exiterr2
 
 bigecho "Compiling and installing Libreswan..."
 
-SWAN_VER=3.27
+SWAN_VER=3.29
 swan_file="libreswan-$SWAN_VER.tar.gz"
 swan_url1="https://github.com/libreswan/libreswan/archive/v$SWAN_VER.tar.gz"
 swan_url2="https://download.libreswan.org/$swan_file"
@@ -192,6 +184,8 @@ cat > Makefile.inc.local <<'EOF'
 WERROR_CFLAGS =
 USE_DNSSEC = false
 USE_DH31 = false
+USE_NSS_AVA_COPY = true
+USE_NSS_IPSEC_PROFILE = false
 USE_GLIBC_KERN_FLIP_HEADERS = true
 EOF
 NPROCS=$(grep -c ^processor /proc/cpuinfo)
@@ -239,9 +233,10 @@ conn shared
   dpddelay=30
   dpdtimeout=120
   dpdaction=clear
+  ikev2=never
   ike=aes256-sha2,aes128-sha2,aes256-sha1,aes128-sha1,aes256-sha2;modp1024,aes128-sha1;modp1024
   phase2alg=aes_gcm-null,aes128-sha1,aes256-sha1,aes256-sha2_512,aes128-sha2,aes256-sha2
-  sha2-truncbug=yes
+  sha2-truncbug=no
 
 conn l2tp-psk
   auto=add
@@ -263,7 +258,6 @@ conn xauth-psk
   modecfgpull=yes
   xauthby=file
   ike-frag=yes
-  ikev2=never
   cisco-unity=yes
   also=shared
 EOF
@@ -457,8 +451,8 @@ chmod 600 /etc/ipsec.secrets* /etc/ppp/chap-secrets* /etc/ipsec.d/passwd*
 # Apply new IPTables rules
 iptables-restore < "$IPT_FILE"
 
-# Fix xl2tpd on CentOS 7, if kernel module "l2tp_ppp" is unavailable
-if grep -qs "release 7" /etc/redhat-release; then
+# Fix xl2tpd on CentOS 7/8, if kernel module "l2tp_ppp" is unavailable
+if grep -qs -e "release 7" -e "release 8" /etc/redhat-release; then
   if ! modprobe -q l2tp_ppp; then
     sed -i '/^ExecStartPre/s/^/#/' /usr/lib/systemd/system/xl2tpd.service
     systemctl daemon-reload
